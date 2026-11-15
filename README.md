@@ -117,8 +117,7 @@ mocked as a `fetch` stub — no network, no token.
 
 ## Repository
 
-Private during development; public release and the marketplace submission are
-planned for M5.
+Public since v0.1.0; available in the BB Community marketplace.
 
 ## License
 

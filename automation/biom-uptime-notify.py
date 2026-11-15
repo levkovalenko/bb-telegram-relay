@@ -25,15 +25,15 @@ INCIDENT_PROMPT = """Сайт недоступен: плагин Uptime подт
 {status_lines}
 
 Известные факты:
-- Оба сайта указывают на VPS 161.104.50.72: продакшен https://xn--80abghoczlees.xn--p1ai/ и dev https://xn--b1add.xn--80abghoczlees.xn--p1ai/.
-- Деплой идёт через GitLab CI: gitlab.com/ml.devs/botanic-portal/eko-labs; репозиторий на этом хосте в /home/autowork/botanic-portal.
+- Оба сайта работают на одном VPS (адрес и окружение — в ваших деплой-доках).
+- Деплой идёт через ваш GitLab CI; локальный checkout репозитория: <your-repo-checkout>.
 - SSH-доступа к VPS с этой машины нет (ключи — секреты GitLab CI), подключаться к VPS не пытайтесь.
 
 Задача — диагностировать причину (только чтение, ничего не менять):
 1. DNS: резолвится ли домен (curl "https://dns.google/resolve?name=<домен>&type=A"); сравните с другими .рф/.ру сайтами и известным .com — проблема у локального резолвера или глобальная.
 2. HTTPS: curl -svv https://<домен>/health — статус-код, срок действия TLS-сертификата, время ответа.
 3. Вывод по типу сбоя: DNS / TLS / 5xx / таймаут / другое.
-4. Был ли свежий деплой перед сбоем: git log --oneline -5 --date=iso в /home/autowork/botanic-portal (только чтение).
+4. Был ли свежий деплой перед сбоем: git log --oneline -5 --date=iso в локальном checkout (<your-repo-checkout>), только чтение.
 
 Результат (на русском):
 - Короткий вывод в Telegram команды: `bb telegram-relay broadcast --title "<≤80 символов>" --body "<≤180 символов>" --channels incidents --level critical`.

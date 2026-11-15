@@ -106,8 +106,7 @@ bb plugin install . # затем: bb plugin config telegram-relay set botToken <
 
 ## Репозиторий
 
-Private на время разработки; публикация в public и submission в marketplace
-запланированы на M5.
+Public с версии v0.1.0; доступен в BB Community marketplace.
 
 ## Лицензия
 
