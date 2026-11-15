@@ -1,0 +1,49 @@
+{
+  "name": "bb-plugin-telegram-relay",
+  "version": "0.1.0",
+  "description": "Multi-user Telegram relay for team notifications: long-polling bot, channels and subscriptions in a local SQLite store, RU/EN bot messages.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "bb-plugin",
+    "telegram",
+    "notifications",
+    "relay",
+    "broadcast"
+  ],
+  "engines": {
+    "bb": ">=0.49",
+    "bbPluginSdk": ">=0.6.132"
+  },
+  "scripts": {
+    "build": "bb plugin build",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/"
+  },
+  "bb": {
+    "name": "Telegram Relay",
+    "description": "Team notifications over Telegram: a long-polling bot with channels and subscriptions, managed from the bot itself (/admin) and the bb CLI. Russian and English.",
+    "branding": {
+      "icon": "Send"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.132",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "better-sqlite3": "^12.0.0",
+    "cron-parser": "^5.5.0",
+    "hono": "^4.11.9",
+    "typescript": "^5.7.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true
+  }
+}
