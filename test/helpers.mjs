@@ -23,6 +23,11 @@ function jsonResponse(status, body) {
  *   { status: 409 }              -> 409 Conflict (another consumer)
  *   { status: 429, retryAfter }  -> 429 with parameters.retry_after
  * An empty queue answers 200 with no updates (like a quiet long poll).
+ *
+ * sendMessageRules: per-chat scripted answers for outbound sendMessage
+ * (broadcast tests): { chatId, status, description?, retryAfter?, times? } —
+ * matched by chat_id, one-shot unless `times` is given. Unmatched chats
+ * answer 200 as before.
  */
 export function createTelegramFetchStub() {
   const state = {
@@ -32,6 +37,7 @@ export function createTelegramFetchStub() {
     sentMessages: [], // { chatId, text, replyMarkup }
     answeredCallbacks: [], // { id, text }
     editedMessages: [], // { chatId, messageId, text, replyMarkup }
+    sendMessageRules: [], // { chatId, status, description?, retryAfter?, times? }
     me: {
       id: 905000001,
       is_bot: true,
@@ -64,10 +70,24 @@ export function createTelegramFetchStub() {
         return jsonResponse(200, { ok: true, result: next.updates ?? [] });
       }
       case "sendMessage": {
+        const rule = state.sendMessageRules.find(
+          (r) => r.chatId === params.chat_id && (r.times === undefined || r.times > 0),
+        );
+        if (rule) {
+          if (rule.times !== undefined) rule.times -= 1;
+          return jsonResponse(rule.status, {
+            ok: false,
+            description: rule.description ?? `stub ${rule.status}`,
+            ...(rule.retryAfter !== undefined
+              ? { parameters: { retry_after: rule.retryAfter } }
+              : {}),
+          });
+        }
         state.sentMessages.push({
           chatId: params.chat_id,
           text: params.text,
           replyMarkup: params.reply_markup ?? null,
+          parseMode: params.parse_mode ?? null,
         });
         return jsonResponse(200, {
           ok: true,

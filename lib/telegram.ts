@@ -63,7 +63,7 @@ export interface TelegramApi {
     token: string,
     chatId: number,
     text: string,
-    opts?: { replyMarkup?: TelegramReplyMarkup },
+    opts?: { parseMode?: "Markdown"; replyMarkup?: TelegramReplyMarkup },
   ): Promise<{ messageId: number }>;
   answerCallbackQuery(
     token: string,
@@ -211,6 +211,7 @@ export function createTelegramApi(options: CreateTelegramApiOptions = {}): Teleg
       call<{ message_id: number }>(token, "sendMessage", {
         chat_id: chatId,
         text,
+        ...(opts?.parseMode ? { parse_mode: opts.parseMode } : {}),
         ...(opts?.replyMarkup ? { reply_markup: opts.replyMarkup } : {}),
       }).then((result) => ({ messageId: result.message_id })),
     answerCallbackQuery: (token, callbackQueryId, text) =>

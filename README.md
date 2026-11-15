@@ -7,8 +7,9 @@ An existing Telegram bot (outbound HTTPS long polling, no webhook, no ports)
 receives team members' commands; channels and subscriptions live in the
 plugin's own SQLite database. M1 delivers the backbone: polling service,
 storage, bot commands, owner management (bot `/admin` + `bb telegram-relay`
-CLI), RU/EN bot text, and a stub panel. Broadcast delivery, the management
-UI, and the end-to-end monitoring scenario land in M2–M4.
+CLI), RU/EN bot text, and a stub panel. M2 adds broadcast delivery with an
+append-only delivery journal. The management UI and the end-to-end
+monitoring scenario land in M3–M4.
 
 ## Bot commands
 
@@ -32,7 +33,42 @@ bb telegram-relay subs [channel]
 bb telegram-relay channel create <id> [name...]
 bb telegram-relay channel delete <id>
 bb telegram-relay channel default <id>
+bb telegram-relay broadcast --title <t> --body <b> --channels <c1,c2> [--level info|warning|critical]
+bb telegram-relay deliveries [limit]
 ```
+
+## Broadcast delivery (M2)
+
+Automations and agents deliver team notifications with the CLI or the plugin
+RPC (same contract):
+
+```
+bb telegram-relay broadcast --title <t> --body <b> --channels <c1,c2> [--level info|warning|critical]
+bb telegram-relay deliveries [limit]        # recent broadcasts, metadata only
+```
+
+RPC: `broadcast({ title, body, channels, level? })` → `{ logId, sent,
+failed }`, and `listDeliveries({ limit? })` (the M3 journal UI input).
+
+Behavior:
+
+- Recipients are the unique chats subscribed to any of the listed channels;
+  each chat gets the message once. Unknown channel names are an error.
+- Global pacing of ~30 msg/s; HTTP 429 waits the API's `retry_after` and
+  retries the send.
+- A Markdown parse 400 is retried as plain text and still counts as
+  delivered.
+- One recipient's failure (403 blocked, 400, network) is logged and never
+  stops the rest of the fan-out.
+- After 3 consecutive failures per chat its subscriptions are removed
+  automatically (logged as "auto-unsubscribed"); any successful delivery
+  resets the counter. Pure network errors count toward the streak but do not
+  trigger the unsubscription (an outage must not unsubscribe everyone).
+
+Every broadcast appends one row to the `delivery_log` journal (kept to the
+newest 1000 rows): channel ids, title, level, sent/failed counters, and the
+per-recipient error metadata `{ chat_id, code, description }`. Message
+bodies are never logged or stored.
 
 ## Settings
 

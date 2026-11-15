@@ -21,6 +21,19 @@ export const MIGRATIONS = [
     last_seen_at  TEXT,
     UNIQUE (chat_id, channel_id)
   )`,
+  // M2: append-only delivery journal. Metadata only — never message bodies:
+  // `errors` is a JSON array of { chat_id, code, description } (the API error
+  // description, e.g. "Forbidden: bot was blocked by the user").
+  `CREATE TABLE IF NOT EXISTS delivery_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel    TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    level      TEXT NOT NULL DEFAULT 'info',
+    sent       INTEGER NOT NULL DEFAULT 0,
+    failed     INTEGER NOT NULL DEFAULT 0,
+    errors     TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  )`,
 ] as const;
 
 export interface ChannelRow {
@@ -170,4 +183,83 @@ export function subscriberCount(db: Database): number {
     count: number;
   };
   return row.count;
+}
+
+/** Remove every subscription of one chat (auto-unsubscribe). Returns the channel ids removed. */
+export function unsubscribeChat(db: Database, chatId: number): string[] {
+  const rows = db
+    .prepare(`SELECT channel_id FROM subscriptions WHERE chat_id = ?`)
+    .all(chatId) as { channel_id: string }[];
+  if (rows.length === 0) return [];
+  db.prepare(`DELETE FROM subscriptions WHERE chat_id = ?`).run(chatId);
+  return rows.map((row) => row.channel_id);
+}
+
+// ---------------------------------------------------------------------------
+// delivery_log (M2): append-only broadcast journal, metadata only.
+
+/** One failed recipient in the journal: metadata only, never message text. */
+export interface DeliveryErrorMeta {
+  chat_id: number;
+  /** HTTP status from the Telegram API, or "network"/"unknown" when there was none. */
+  code: number | "network" | "unknown";
+  /** The API error description (e.g. "Forbidden: bot was blocked by the user"). */
+  description: string;
+}
+
+export interface DeliveryLogEntry {
+  /** Comma-joined channel ids the broadcast was sent to. */
+  channel: string;
+  title: string;
+  level: string;
+  sent: number;
+  failed: number;
+  errors: DeliveryErrorMeta[];
+}
+
+export interface DeliveryLogRow extends DeliveryLogEntry {
+  id: number;
+  created_at: string;
+}
+
+/** Cap on journal rows; older rows are pruned on each new insert. */
+export const DELIVERY_LOG_RETENTION = 1000;
+
+/** Append one journal row (pruning to the newest DELIVERY_LOG_RETENTION) and return its id. */
+export function logDelivery(db: Database, entry: DeliveryLogEntry): number {
+  const info = db
+    .prepare(
+      `INSERT INTO delivery_log (channel, title, level, sent, failed, errors)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      entry.channel,
+      entry.title,
+      entry.level,
+      entry.sent,
+      entry.failed,
+      JSON.stringify(entry.errors),
+    );
+  const logId = Number(info.lastInsertRowid);
+  db.prepare(
+    `DELETE FROM delivery_log WHERE id NOT IN
+     (SELECT id FROM delivery_log ORDER BY id DESC LIMIT ?)`,
+  ).run(DELIVERY_LOG_RETENTION);
+  return logId;
+}
+
+export function listDeliveries(db: Database, limit = 50): DeliveryLogRow[] {
+  const rows = db
+    .prepare(`SELECT * FROM delivery_log ORDER BY id DESC LIMIT ?`)
+    .all(limit) as (Omit<DeliveryLogRow, "errors"> & { errors: string })[];
+  return rows.map((row) => {
+    let errors: DeliveryErrorMeta[] = [];
+    try {
+      const parsed = JSON.parse(row.errors);
+      if (Array.isArray(parsed)) errors = parsed;
+    } catch {
+      // corrupted journal cell: keep the row, drop the unparseable metadata
+    }
+    return { ...row, errors };
+  });
 }

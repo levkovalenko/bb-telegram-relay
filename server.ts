@@ -1,8 +1,12 @@
 // bb-plugin-telegram-relay — backend entry.
 //
-// Multi-user Telegram relay for team notifications (M1: inbound bot commands
-// over long polling, channels + subscriptions in SQLite, owner /admin;
-// broadcast delivery and the management UI land in M2–M4).
+// Multi-user Telegram relay for team notifications.
+//   M1: inbound bot commands over long polling, channels + subscriptions
+//       in SQLite, owner /admin;
+//   M2: broadcast delivery (pacing, 429 retry_after, Markdown fallback,
+//       per-recipient isolation, auto-unsubscribe) + append-only
+//       delivery_log journal + `broadcast`/`deliveries` CLI and RPC;
+//   M3–M4: management UI and the end-to-end monitoring scenario.
 //
 //   settings (bb.settings): botToken (secret, 0600 file — never in db/frontend),
 //     ownerChatId, enabled, pollTimeout
@@ -17,6 +21,7 @@
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { createBot } from "./lib/commands.js";
+import { createDelivery, type DeliveryLevel } from "./lib/delivery.js";
 import { detectLocale, translate, type MessageKey } from "./lib/i18n.js";
 import { OFFSET_KV_KEY, runPoller, type PollerStatus } from "./lib/poller.js";
 import * as store from "./lib/store.js";
@@ -31,8 +36,9 @@ export {
   TelegramRateLimitError,
 } from "./lib/telegram.js";
 export { createBot } from "./lib/commands.js";
-export { MIGRATIONS, isChannelIdValid } from "./lib/store.js";
-export type { ChannelInfo, SubscriberRow } from "./lib/store.js";
+export { createDelivery } from "./lib/delivery.js";
+export { MIGRATIONS, isChannelIdValid, DELIVERY_LOG_RETENTION } from "./lib/store.js";
+export type { ChannelInfo, SubscriberRow, DeliveryLogRow } from "./lib/store.js";
 
 // Browser-safe contract: app.tsx imports only its TYPE from this module.
 export const rpcContract = defineRpcContract({
@@ -60,7 +66,65 @@ export const rpcContract = defineRpcContract({
       subscribers: z.number().int(),
     }),
   },
+  broadcast: {
+    input: z.object({
+      title: z.string().min(1),
+      body: z.string(),
+      channels: z.array(z.string().min(1)).min(1),
+      level: z.enum(["info", "warning", "critical"]).optional(),
+    }),
+    output: z.object({
+      logId: z.number().int(),
+      sent: z.number().int(),
+      failed: z.number().int(),
+    }),
+  },
+  listDeliveries: {
+    input: z.object({ limit: z.number().int().min(1).max(1000).optional() }),
+    output: z.array(
+      z.object({
+        id: z.number().int(),
+        channel: z.string(),
+        title: z.string(),
+        level: z.string(),
+        sent: z.number().int(),
+        failed: z.number().int(),
+        errors: z.array(
+          z.object({
+            chat_id: z.number().int(),
+            code: z.union([z.number().int(), z.literal("network"), z.literal("unknown")]),
+            description: z.string(),
+          }),
+        ),
+        created_at: z.string(),
+      }),
+    ),
+  },
 });
+
+const DELIVERY_LEVELS: readonly DeliveryLevel[] = ["info", "warning", "critical"];
+
+/** Parse `--flag value` / `--flag=value` pairs from a CLI argv tail. */
+function parseFlagArgs(argv: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (!arg.startsWith("--")) continue;
+    const eq = arg.indexOf("=");
+    if (eq !== -1) {
+      out[arg.slice(2, eq)] = arg.slice(eq + 1);
+    } else {
+      const value = argv[i + 1];
+      if (value !== undefined && !value.startsWith("--")) {
+        out[arg.slice(2)] = value;
+        i += 1;
+      } else {
+        out[arg.slice(2)] = "true";
+      }
+    }
+  }
+  return out;
+}
 
 export default async function plugin(bb: BbPluginApi) {
   bb.log.info("loaded");
@@ -142,6 +206,43 @@ export default async function plugin(bb: BbPluginApi) {
     await bot.handleUpdate(update);
   }
 
+  // M2: broadcast delivery + auto-unsubscribe. The per-chat consecutive
+  // failure counter lives in plugin KV (one JSON map: chatId -> count) —
+  // durable across restarts, and it never holds message bodies.
+  const DELIVERY_FAILS_KV_KEY = "delivery-failures";
+  async function readFailures(): Promise<Record<string, number>> {
+    const raw = await bb.storage.kv.get<Record<string, number>>(DELIVERY_FAILS_KV_KEY);
+    return raw && typeof raw === "object" ? raw : {};
+  }
+  const failures = {
+    async get(chatId: number): Promise<number> {
+      const map = await readFailures();
+      return map[String(chatId)] ?? 0;
+    },
+    async inc(chatId: number): Promise<number> {
+      const map = await readFailures();
+      const count = (map[String(chatId)] ?? 0) + 1;
+      map[String(chatId)] = count;
+      await bb.storage.kv.set(DELIVERY_FAILS_KV_KEY, map);
+      return count;
+    },
+    async reset(chatId: number): Promise<void> {
+      const map = await readFailures();
+      if (map[String(chatId)] === undefined) return;
+      delete map[String(chatId)];
+      await bb.storage.kv.set(DELIVERY_FAILS_KV_KEY, map);
+    },
+  };
+
+  const delivery = createDelivery({
+    db,
+    api,
+    getToken: async () => (await currentSettings()).token,
+    log: bb.log,
+    failures,
+    onChange: notifyChanged,
+  });
+
   // The long polling service: starts after load, gets an AbortSignal on
   // reload/disable/shutdown, restarts with backoff if it crashes.
   bb.background.service("telegram-poller", {
@@ -190,6 +291,16 @@ export default async function plugin(bb: BbPluginApi) {
       })),
       subscribers: store.subscriberCount(db),
     }),
+    broadcast: async (input) => {
+      const result = await delivery.broadcast({
+        title: input.title,
+        body: input.body,
+        channels: input.channels,
+        level: input.level,
+      });
+      return { logId: result.logId, sent: result.sent, failed: result.failed };
+    },
+    listDeliveries: async (input) => store.listDeliveries(db, input.limit ?? 50),
   });
 
   // `bb telegram-relay` — owner management from a shell (mirrors /admin).
@@ -201,6 +312,8 @@ export default async function plugin(bb: BbPluginApi) {
     "  bb telegram-relay channel create <id> [name...]",
     "  bb telegram-relay channel delete <id>",
     "  bb telegram-relay channel default <id>",
+    "  bb telegram-relay broadcast --title <t> --body <b> --channels <c1,c2> [--level info|warning|critical]",
+    "  bb telegram-relay deliveries [limit]  Show recent broadcasts (metadata only)",
   ].join("\n");
   bb.cli.register({
     name: "telegram-relay",
@@ -222,6 +335,17 @@ export default async function plugin(bb: BbPluginApi) {
         summary: "Create / delete / setdefault a channel",
         usage:
           "bb telegram-relay channel create <id> [name...] | delete <id> | default <id>",
+      },
+      {
+        name: "broadcast",
+        summary: "Send a message to subscribers of the given channels",
+        usage:
+          "bb telegram-relay broadcast --title <t> --body <b> --channels <c1,c2> [--level info|warning|critical]",
+      },
+      {
+        name: "deliveries",
+        summary: "Show recent broadcasts (metadata only)",
+        usage: "bb telegram-relay deliveries [limit]",
       },
     ],
     async run(argv) {
@@ -307,6 +431,68 @@ export default async function plugin(bb: BbPluginApi) {
             default:
               return { exitCode: 1, stderr: usage };
           }
+        }
+        case "broadcast": {
+          const flags = parseFlagArgs(rest);
+          const title = flags.title ?? "";
+          const body = flags.body;
+          const channelsRaw = flags.channels ?? "";
+          const level = flags.level;
+          if (!title || body === undefined || channelsRaw === "") {
+            return {
+              exitCode: 1,
+              stderr:
+                "broadcast requires --title <t> --body <b> --channels <c1,c2> [--level info|warning|critical]",
+            };
+          }
+          if (level !== undefined && !DELIVERY_LEVELS.includes(level as DeliveryLevel)) {
+            return {
+              exitCode: 1,
+              stderr: "--level must be one of: info, warning, critical",
+            };
+          }
+          const channels = channelsRaw.split(",").map((part) => part.trim()).filter((part) => part !== "");
+          if (channels.length === 0) {
+            return { exitCode: 1, stderr: "--channels must name at least one channel" };
+          }
+          try {
+            const result = await delivery.broadcast({
+              title,
+              body,
+              channels,
+              level: (level ?? "info") as DeliveryLevel,
+            });
+            const lines = [
+              `sent: ${result.sent}`,
+              `failed: ${result.failed}`,
+              `logId: ${result.logId}`,
+              ...result.autoUnsubscribed.map((chatId) => `auto-unsubscribed chat ${chatId}`),
+            ];
+            return { exitCode: 0, stdout: lines.join("\n") };
+          } catch (cause) {
+            return {
+              exitCode: 1,
+              stderr: cause instanceof Error ? cause.message : String(cause),
+            };
+          }
+        }
+        case "deliveries": {
+          const limit = rest[0] !== undefined ? Number.parseInt(rest[0], 10) : 20;
+          if (!Number.isInteger(limit) || limit < 1) {
+            return { exitCode: 1, stderr: "deliveries expects a positive integer limit" };
+          }
+          const rows = store.listDeliveries(db, Math.min(limit, 1000));
+          if (rows.length === 0) return { exitCode: 0, stdout: "No deliveries logged yet." };
+          return {
+            exitCode: 0,
+            stdout: rows
+              .map(
+                (row) =>
+                  `#${row.id} ${row.created_at} [${row.level}] ${row.channel} ` +
+                    `sent=${row.sent} failed=${row.failed} ${row.title}`,
+              )
+              .join("\n"),
+          };
         }
         default:
           return { exitCode: 1, stderr: usage };
