@@ -16,7 +16,8 @@
 //     de-duplication, backoff, 429 retry_after and graceful 409 stop
 //   cli      (bb.cli): `bb telegram-relay` — status/channels/subscribers/
 //     channel management from a shell
-//   rpc      (bb.rpc): status + channels for the (stub, until M3) panel
+//   rpc      (bb.rpc): status / channels / subscribers / deliveries /
+//     broadcast for the M3 management panel
 
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -78,6 +79,18 @@ export const rpcContract = defineRpcContract({
       sent: z.number().int(),
       failed: z.number().int(),
     }),
+  },
+  listSubscribers: {
+    input: z.object({ channel: z.string().min(1).optional() }),
+    output: z.array(
+      z.object({
+        chat_id: z.number().int(),
+        tg_username: z.string().nullable(),
+        channel_id: z.string(),
+        subscribed_at: z.string(),
+        last_seen_at: z.string().nullable(),
+      }),
+    ),
   },
   listDeliveries: {
     input: z.object({ limit: z.number().int().min(1).max(1000).optional() }),
@@ -300,6 +313,7 @@ export default async function plugin(bb: BbPluginApi) {
       });
       return { logId: result.logId, sent: result.sent, failed: result.failed };
     },
+    listSubscribers: async (input) => store.listSubscribers(db, input.channel),
     listDeliveries: async (input) => store.listDeliveries(db, input.limit ?? 50),
   });
 
