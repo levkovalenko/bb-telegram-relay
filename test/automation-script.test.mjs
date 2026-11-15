@@ -54,7 +54,7 @@ const badCheck = (at, error = "fetch failed") => ({ at, ok: false, status: null,
 const site = (id, name, checks) => ({ id, name, url: `https://${name}/health`, checks });
 
 /** Run the real script in a fresh temp cwd; return rc, captured bb calls, state. */
-function runScript({ uptime, state = null } = {}) {
+function runScript({ uptime, state = null, extraEnv = {} } = {}) {
   const home = mkdtempSync(path.join(tmpdir(), "auto-script-"));
   const bin = path.join(home, "bin");
   const work = path.join(home, "work");
@@ -79,6 +79,7 @@ function runScript({ uptime, state = null } = {}) {
       BB_FAKE_CAPTURE: captureFile,
       PROJECT_ID: "proj_test",
       MONITOR_THREAD: "thr_test",
+      ...extraEnv,
     },
   });
   const calls = existsSync(captureFile)
@@ -157,4 +158,38 @@ test("no state change: silent tick, zero bb calls, state untouched", () => {
   assert.equal(r.status, 0);
   assert.equal(r.calls.length, 0, "silent tick must call bb zero times");
   assert.deepEqual(r.newState, { a1: "UP" });
+});
+
+test("DOWN with INCIDENT_* set: incident agent spawn carries --provider/--model/--reasoning-level", () => {
+  const r = runScript({
+    uptime: [site("a1", "site-a", [okCheck(1), badCheck(2), badCheck(3)])],
+    state: { a1: "UP" },
+    extraEnv: {
+      INCIDENT_PROVIDER: "acp-opencode",
+      INCIDENT_MODEL: "11m/qwen3.8-27b-8fp-mtp-3",
+      INCIDENT_REASONING: "high",
+    },
+  });
+  assert.equal(r.status, 0);
+  const s = r.calls.find((c) => c.cmd === "thread-spawn");
+  assert.ok(s, "incident agent must be spawned on DOWN");
+  assert.equal(argOf(s, "--provider"), "acp-opencode");
+  assert.equal(argOf(s, "--model"), "11m/qwen3.8-27b-8fp-mtp-3");
+  assert.equal(argOf(s, "--reasoning-level"), "high");
+  assert.equal(argOf(s, "--project"), "proj_test");
+  assert.equal(argOf(s, "--parent-thread"), "thr_test");
+});
+
+test("DOWN with empty INCIDENT_* env: spawn keeps default (no --provider/--model/--reasoning-level)", () => {
+  const r = runScript({
+    uptime: [site("a1", "site-a", [okCheck(1), badCheck(2), badCheck(3)])],
+    state: { a1: "UP" },
+    extraEnv: { INCIDENT_PROVIDER: "", INCIDENT_MODEL: "", INCIDENT_REASONING: "" },
+  });
+  assert.equal(r.status, 0);
+  const s = r.calls.find((c) => c.cmd === "thread-spawn");
+  assert.ok(s, "incident agent must be spawned on DOWN");
+  assert.ok(!s.args.includes("--provider"), "no --provider when INCIDENT_PROVIDER is empty");
+  assert.ok(!s.args.includes("--model"), "no --model when INCIDENT_MODEL is empty");
+  assert.ok(!s.args.includes("--reasoning-level"), "no --reasoning-level when INCIDENT_REASONING is empty");
 });

@@ -18,6 +18,9 @@ import time
 STATE_FILE = "biomregiona-uptime-state.json"
 PROJECT_ID = os.environ.get("PROJECT_ID", "")
 MONITOR_THREAD = os.environ.get("MONITOR_THREAD", "")
+INCIDENT_PROVIDER = os.environ.get("INCIDENT_PROVIDER", "")
+INCIDENT_MODEL = os.environ.get("INCIDENT_MODEL", "")
+INCIDENT_REASONING = os.environ.get("INCIDENT_REASONING", "")
 
 INCIDENT_PROMPT = """Сайт недоступен: плагин Uptime подтвердил падение (2 неудачных health-чека подряд).
 
@@ -63,6 +66,12 @@ def spawn_incident_agent(status_lines):
         return False
     args = ["thread", "spawn", "--project", PROJECT_ID,
             "--parent-thread", MONITOR_THREAD, "--prompt-file", "-"]
+    if INCIDENT_PROVIDER:
+        args += ["--provider", INCIDENT_PROVIDER]
+    if INCIDENT_MODEL:
+        args += ["--model", INCIDENT_MODEL]
+    if INCIDENT_REASONING:
+        args += ["--reasoning-level", INCIDENT_REASONING]
     r = bb(*args, input_text=INCIDENT_PROMPT.format(status_lines=status_lines))
     if r.returncode != 0:
         sys.stderr.write("thread spawn failed: %s %s\n" % (r.stdout.strip(), r.stderr.strip()))
