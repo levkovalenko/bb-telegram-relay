@@ -1,14 +1,15 @@
 ---
 name: telegram-relay
-description: Inspect and manage the Telegram Relay plugin (bb-plugin-telegram-relay): poller status, channels, and subscribers, via the `bb telegram-relay` CLI. Use when the user asks about Telegram notifications, relay channels, or who is subscribed.
+description: "Inspect and manage the Telegram Relay plugin (bb-plugin-telegram-relay): poller status, channels, subscribers, broadcasts, and the delivery journal, via the `bb telegram-relay` CLI. Use when the user asks about Telegram notifications, relay channels, who is subscribed, or sending a team broadcast."
 ---
 
 # Telegram relay
 
-The Telegram Relay plugin runs a long-polling Telegram bot (M1). Users join
-with `/start`, pick channels with `/channels`, and the owner manages channels
-from the bot (`/admin`) or from a shell (`bb telegram-relay channel …`).
-Broadcast delivery lands in M2; this skill covers the current surfaces.
+The Telegram Relay plugin runs a long-polling Telegram bot. Users join with
+`/start`, pick channels with `/channels`, and the owner manages channels from
+the bot (`/admin`) or a shell. Broadcasts fan out to channel subscribers at a
+pace of ~30 msg/s with 429 `retry_after` handling, and chats that keep failing
+are auto-unsubscribed. A management panel (RU/EN) is in the BB UI.
 
 ## Settings
 
@@ -33,6 +34,8 @@ loop, so `enabled`/`pollTimeout` apply without a reload.
 | `bb telegram-relay channel create <id> [name…]` | Create a channel (id: lowercase slug). The first channel becomes the default. |
 | `bb telegram-relay channel delete <id>` | Delete a channel with its subscriptions. |
 | `bb telegram-relay channel default <id>` | Make a channel the default for `/start`. |
+| `bb telegram-relay broadcast --title <t> --body <b> --channels <c1,c2> [--level info\|warning\|critical]` | Send to all subscribers of the listed channels (paced, 429-aware, auto-unsubscribes failing chats). |
+| `bb telegram-relay deliveries [limit]` | Recent broadcasts (metadata only: title, level, counts, outcome). |
 
 ## Bot commands (for the users)
 
@@ -46,5 +49,7 @@ loop, so `enabled`/`pollTimeout` apply without a reload.
 - 409 from `api.telegram.org` means another consumer polls the same token;
   the poller stops gracefully and reports `conflict`. Stop the other consumer
   and run `bb plugin reload telegram-relay`.
+- The polling offset is per-bot: after a bot token change the poller detects
+  the new bot id (getMe) and starts a fresh sequence (offset 0).
 - Logs carry metadata only (chat id, command, outcome); message contents and
   the token are never logged.
