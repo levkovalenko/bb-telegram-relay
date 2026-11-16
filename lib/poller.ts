@@ -4,7 +4,12 @@
 // and a graceful stop on 409 Conflict (another consumer holds the token).
 //
 // The polling offset is persisted in plugin KV (a durable cursor) so a
-// restart does not redeliver updates already acked to Telegram.
+// restart does not redeliver updates already acked to Telegram. update_id is
+// a per-bot sequence, so the offset is stored together with the bot's
+// numeric id (getMe): after a bot token change the poller restarts the
+// sequence from 0 instead of inheriting a foreign offset. Batches that do
+// not advance the offset (the API re-delivering stale updates) get a growing
+// backoff so they cannot hot-loop the API.
 
 import {
   TelegramConflictError,
@@ -36,6 +41,13 @@ export interface PollerDeps {
   /** Durable cursor: load/save the acked polling offset. */
   loadOffset: () => Promise<number>;
   saveOffset: (offset: number) => Promise<void>;
+  /**
+   * Durable identity (numeric bot id) of the bot the stored offset was acked
+   * for. update_id is a per-bot sequence, so the offset is only valid for
+   * that bot; after a token change the sequence restarts from 0.
+   */
+  loadBotId: () => Promise<number | null>;
+  saveBotId: (botId: number) => Promise<void>;
   log: {
     debug(message: string): void;
     info(message: string): void;
@@ -53,6 +65,7 @@ const GET_UPDATES_LIMIT = 100;
 const SEEN_RETAIN_BELOW_OFFSET = 1_000;
 
 export const OFFSET_KV_KEY = "polling-offset";
+export const BOT_ID_KV_KEY = "polling-bot-id";
 
 /**
  * NeedsConfigurationError is matched by name by the host (no import needed),
@@ -82,12 +95,37 @@ export async function runPoller(deps: PollerDeps, signal: AbortSignal): Promise<
   let offset = Math.max(0, await deps.loadOffset().catch(() => 0));
   const seen = new Set<number>();
   let backoffMs = INITIAL_BACKOFF_MS;
+  // Stale-batch backoff: the API can get stuck returning updates that can
+  // never advance the offset (e.g. an offset inherited from a previous bot).
+  // Long polling only waits when a batch is empty, so such batches would
+  // hot-loop the API; consecutive no-advance batches get a growing pause.
+  let staleBatches = 0;
+  let staleBackoffMs = INITIAL_BACKOFF_MS;
+  // Bot identity, cached per token: one getMe per distinct token.
+  const botIdCache = new Map<string, number>();
+  let sequenceToken: string | null = null;
 
   const persistOffset = async (): Promise<void> => {
     try {
       await deps.saveOffset(offset);
     } catch (cause) {
       log.warn(`offset persist failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  };
+
+  /** Numeric bot id for a token (cached in memory; null when getMe fails). */
+  const resolveBotId = async (token: string): Promise<number | null> => {
+    const cached = botIdCache.get(token);
+    if (cached !== undefined) return cached;
+    try {
+      const me = await api.getMe(token);
+      botIdCache.set(token, me.id);
+      return me.id;
+    } catch (cause) {
+      log.warn(
+        `getMe failed; bot identity not verified this round: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+      return null;
     }
   };
 
@@ -114,6 +152,44 @@ export async function runPoller(deps: PollerDeps, signal: AbortSignal): Promise<
       continue;
     }
 
+    // (Re)resolve the token's bot identity: the persisted offset only belongs
+    // to the bot it was acked for, so a different bot starts a fresh
+    // sequence. If getMe fails, keep the previous offset and re-check next
+    // round (sequenceToken stays at the previous token).
+    if (settings.token !== sequenceToken) {
+      const botId = await resolveBotId(settings.token);
+      if (botId !== null) {
+        sequenceToken = settings.token;
+        const storedBotId = await deps.loadBotId().catch((cause) => {
+          log.warn(
+            `bot id load failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+          );
+          return null;
+        });
+        if (storedBotId !== botId) {
+          log.info(
+            storedBotId === null
+              ? `no stored bot identity for offset ${offset}; starting a fresh polling sequence (offset reset to 0)`
+              : "bot changed → new polling sequence (offset reset to 0)",
+          );
+          // Restart from 0: the first getUpdates returns the new bot's
+          // pending updates (≤24h); the seen-set and the idempotent command
+          // handlers make re-dispatching them safe.
+          offset = 0;
+          seen.clear();
+          staleBatches = 0;
+          staleBackoffMs = INITIAL_BACKOFF_MS;
+          try {
+            await deps.saveBotId(botId);
+          } catch (cause) {
+            log.warn(
+              `bot id persist failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+            );
+          }
+        }
+      }
+    }
+
     status.state = "polling";
     try {
       const updates = await api.getUpdates(settings.token, {
@@ -123,8 +199,16 @@ export async function runPoller(deps: PollerDeps, signal: AbortSignal): Promise<
       });
       backoffMs = INITIAL_BACKOFF_MS;
 
+      const offsetBefore = offset;
       for (const update of updates) {
-        if (update.update_id >= offset) offset = update.update_id + 1;
+        if (update.update_id < offset) {
+          // Already acked — or unreachable, e.g. the API re-delivering its
+          // last update while the offset is from a different bot's sequence.
+          // Never dispatch and never advance on such an update.
+          log.debug(`update ${update.update_id} below offset ${offset}; skipped`);
+          continue;
+        }
+        offset = update.update_id + 1;
         if (seen.has(update.update_id)) {
           log.debug(`update ${update.update_id} duplicated; skipped`);
           continue;
@@ -141,11 +225,29 @@ export async function runPoller(deps: PollerDeps, signal: AbortSignal): Promise<
         }
       }
 
+      const advanced = offset > offsetBefore;
+      if (!advanced && updates.length > 0) {
+        // The API is re-delivering updates below the offset; without a pause
+        // this would call getUpdates back-to-back forever.
+        staleBatches += 1;
+        if (staleBatches === 1) {
+          log.warn(`API keeps returning updates below offset ${offset}; backing off`);
+        } else {
+          log.debug(`stale poll batch #${staleBatches}; offset ${offset} unchanged`);
+        }
+        await sleep(staleBackoffMs, signal);
+        staleBackoffMs = Math.min(staleBackoffMs * 2, MAX_BACKOFF_MS);
+      } else {
+        // Offset advanced (or nothing came back): the API is not stuck.
+        staleBatches = 0;
+        staleBackoffMs = INITIAL_BACKOFF_MS;
+      }
+
       // Prune ids the offset has moved past: they cannot re-arrive.
       if (seen.size > SEEN_RETAIN_BELOW_OFFSET * 4) {
         for (const id of seen) if (id < offset - SEEN_RETAIN_BELOW_OFFSET) seen.delete(id);
       }
-      if (updates.length > 0) {
+      if (advanced) {
         log.info(`poll batch: ${updates.length} update(s), offset now ${offset}`);
         await persistOffset();
       }

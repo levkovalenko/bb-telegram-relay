@@ -31,7 +31,7 @@ function jsonResponse(status, body) {
  */
 export function createTelegramFetchStub() {
   const state = {
-    calls: [], // { method, params } for every request
+    calls: [], // { method, params, at } for every request (at = Date.now())
     getUpdatesQueue: [],
     getUpdatesDelayMs: 5,
     sentMessages: [], // { chatId, text, replyMarkup }
@@ -50,7 +50,7 @@ export function createTelegramFetchStub() {
     const parsed = new URL(url);
     const method = parsed.pathname.split("/").filter(Boolean).pop();
     const params = init?.body ? JSON.parse(init.body) : {};
-    state.calls.push({ method, params });
+    state.calls.push({ method, params, at: Date.now() });
 
     switch (method) {
       case "getUpdates": {

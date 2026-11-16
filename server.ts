@@ -24,7 +24,7 @@ import { z } from "zod";
 import { createBot } from "./lib/commands.js";
 import { createDelivery, type DeliveryLevel } from "./lib/delivery.js";
 import { detectLocale, translate, type MessageKey } from "./lib/i18n.js";
-import { OFFSET_KV_KEY, runPoller, type PollerStatus } from "./lib/poller.js";
+import { BOT_ID_KV_KEY, OFFSET_KV_KEY, runPoller, type PollerStatus } from "./lib/poller.js";
 import * as store from "./lib/store.js";
 import { createTelegramApi, type TelegramUpdate } from "./lib/telegram.js";
 
@@ -275,6 +275,10 @@ export default async function plugin(bb: BbPluginApi) {
           loadOffset: async () => (await bb.storage.kv.get<number>(OFFSET_KV_KEY)) ?? 0,
           saveOffset: async (offset) => {
             await bb.storage.kv.set(OFFSET_KV_KEY, offset);
+          },
+          loadBotId: async () => (await bb.storage.kv.get<number>(BOT_ID_KV_KEY)) ?? null,
+          saveBotId: async (botId) => {
+            await bb.storage.kv.set(BOT_ID_KV_KEY, botId);
           },
           log: bb.log,
           status,
