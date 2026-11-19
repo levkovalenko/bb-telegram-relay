@@ -55,5 +55,11 @@ loop, so `enabled`/`pollTimeout` apply without a reload.
   (the host resolver serves a dead AAAA for api.telegram.org; an explicit
   `--dns-result-order` is never overwritten). The log line
   `dns result order set to ipv4first` confirms it.
+- Every Telegram call has a client-side timeout (getUpdates 35 s, others
+  10 s) and is aborted on service stop, so a dead route can't wedge the
+  poller or a broadcast; reloads always meet the stop window.
+- The uptime automation alerts once per DOWN window (state persisted before
+  the broadcast, re-alert after 15 min, one retry with 5 s backoff, flock
+  against overlapping runs) — it is budgeted to the 90 s automation timeout.
 - Logs carry metadata only (chat id, command, outcome); message contents and
   the token are never logged.

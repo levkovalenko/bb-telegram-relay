@@ -59,7 +59,8 @@ Behavior:
 - A Markdown parse 400 is retried as plain text and still counts as
   delivered.
 - One recipient's failure (403 blocked, 400, network) is logged and never
-  stops the rest of the fan-out.
+  stops the rest of the fan-out. Each send is bounded by a 10 s client-side
+  timeout, so one dead route cannot stall the whole broadcast.
 - After 3 consecutive failures per chat its subscriptions are removed
   automatically (logged as "auto-unsubscribed"); any successful delivery
   resets the counter. Pure network errors count toward the streak but do not
@@ -111,6 +112,24 @@ reload.
   `dns result order set to ipv4first (default was verbatim)`, and
   `node --dns-result-order=ipv4first -e "fetch('https://api.telegram.org').then(r=>console.log(r.status))"`
   prints `200`.
+- Client-side request timeouts: `getUpdates` 35 s (long poll `timeoutSeconds`
+  up to 30 s + headroom), all other calls 10 s. A request aimed at a dead
+  route fails as a network error (backoff as usual) instead of hanging
+  forever. On service stop every in-flight request is aborted, so the host's
+  5 s stop window is always met — no wedged poller on reload.
+- Uptime automation script (`automation/biom-uptime-notify.py`), built for the
+  90 s automation timeout:
+  - one alert per DOWN window: the DOWN state is written to the state file
+    *before* the broadcast, so a run killed mid-flight is not re-alerted as a
+    "fresh" status change on the next tick;
+  - re-alert only if the last *delivered* alert is older than 15 min
+    (`ALERT_DEDUPE_SECS`); an undelivered window (`alert_sent_at: null`) is
+    retried on the next tick;
+  - a failed alert is retried once after a 5 s backoff: one attempt ≤
+    3 chats × 10 s + pacing ≈ 32 s, so attempt + retry ≈ 32+5+32 = 69 s < 90 s;
+  - a non-blocking `flock` on a lockfile next to the state file keeps runs
+    from overlapping (a SIGKILLed run releases the lock on death; a held lock
+    means quiet exit 0).
 
 ## Development
 
