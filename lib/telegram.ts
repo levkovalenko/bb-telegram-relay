@@ -7,6 +7,16 @@
 
 export const TELEGRAM_API_BASE = "https://api.telegram.org";
 
+/**
+ * Per-request client-side timeouts (ms). Without them a request aimed at a
+ * dead route (e.g. a blackholed IPv6 path) hangs forever and can wedge the
+ * poller's stop window. getUpdates holds a long poll (up to `timeoutSeconds`,
+ * ≤30 s) so it gets headroom; every other call answers in well under a
+ * second.
+ */
+export const GET_UPDATES_TIMEOUT_MS = 35_000;
+export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+
 /** A Telegram API call failed. `status` is the HTTP status when the API answered. */
 export class TelegramError extends Error {
   readonly status?: number;
@@ -57,7 +67,7 @@ export interface TelegramApi {
   getMe(token: string): Promise<TelegramMe>;
   getUpdates(
     token: string,
-    opts: { offset?: number; limit?: number; timeoutSeconds?: number },
+    opts: { offset?: number; limit?: number; timeoutSeconds?: number; signal?: AbortSignal },
   ): Promise<TelegramUpdate[]>;
   sendMessage(
     token: string,
@@ -142,26 +152,54 @@ export interface CreateTelegramApiOptions {
   /** Injectable fetch (tests stub it). Defaults to the global fetch. */
   fetchImpl?: typeof fetch;
   apiBase?: string;
+  /** getUpdates per-request timeout. Default: GET_UPDATES_TIMEOUT_MS. */
+  getUpdatesTimeoutMs?: number;
+  /** Per-request timeout for all other methods. Default: DEFAULT_REQUEST_TIMEOUT_MS. */
+  defaultTimeoutMs?: number;
 }
 
 export function createTelegramApi(options: CreateTelegramApiOptions = {}): TelegramApi {
   const fetchImpl = options.fetchImpl ?? fetch;
   const base = options.apiBase ?? TELEGRAM_API_BASE;
+  const getUpdatesTimeoutMs = options.getUpdatesTimeoutMs ?? GET_UPDATES_TIMEOUT_MS;
+  const defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 
   async function call<T>(
     token: string,
     method: string,
     params: Record<string, unknown> = {},
+    opts: { timeoutMs: number; signal?: AbortSignal } = { timeoutMs: defaultTimeoutMs },
   ): Promise<T> {
+    // Client-side timeout + shutdown wiring: the per-request controller is
+    // aborted by our timer or by the caller's signal (service stop), so an
+    // in-flight request is cut short instead of hanging on a dead route.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+    const onCallerAbort = (): void => controller.abort();
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        controller.abort();
+      } else {
+        opts.signal.addEventListener("abort", onCallerAbort, { once: true });
+      }
+    }
     let response: Response;
     try {
       response = await fetchImpl(`${base}/bot${token}/${method}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(params),
+        signal: controller.signal,
       });
     } catch (cause) {
+      if (controller.signal.aborted && !opts.signal?.aborted) {
+        // Our timer fired: the API never answered in time.
+        throw new TelegramNetworkError(new Error(`timed out after ${opts.timeoutMs}ms`));
+      }
       throw new TelegramNetworkError(cause);
+    } finally {
+      clearTimeout(timer);
+      opts.signal?.removeEventListener("abort", onCallerAbort);
     }
 
     let envelope: TelegramApiEnvelope<T>;
@@ -200,13 +238,18 @@ export function createTelegramApi(options: CreateTelegramApiOptions = {}): Teleg
   }
 
   return {
-    getMe: (token) => call<TelegramMe>(token, "getMe"),
+    getMe: (token) => call<TelegramMe>(token, "getMe", {}, { timeoutMs: defaultTimeoutMs }),
     getUpdates: (token, opts) =>
-      call<TelegramUpdate[]>(token, "getUpdates", {
-        offset: opts.offset ?? 0,
-        limit: opts.limit ?? 100,
-        timeout: opts.timeoutSeconds ?? 10,
-      }),
+      call<TelegramUpdate[]>(
+        token,
+        "getUpdates",
+        {
+          offset: opts.offset ?? 0,
+          limit: opts.limit ?? 100,
+          timeout: opts.timeoutSeconds ?? 10,
+        },
+        { timeoutMs: getUpdatesTimeoutMs, signal: opts.signal },
+      ),
     sendMessage: (token, chatId, text, opts) =>
       call<{ message_id: number }>(token, "sendMessage", {
         chat_id: chatId,

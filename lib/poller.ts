@@ -196,6 +196,9 @@ export async function runPoller(deps: PollerDeps, signal: AbortSignal): Promise<
         offset,
         limit: GET_UPDATES_LIMIT,
         timeoutSeconds: settings.pollTimeoutSeconds,
+        // Cut the in-flight request on shutdown so the service's stop window
+        // is always met, even if the API (or a dead route) hangs.
+        signal,
       });
       backoffMs = INITIAL_BACKOFF_MS;
 
@@ -252,6 +255,11 @@ export async function runPoller(deps: PollerDeps, signal: AbortSignal): Promise<
         await persistOffset();
       }
     } catch (cause) {
+      if (signal.aborted) {
+        // Service stopping: the in-flight request was just aborted — exit
+        // quietly instead of logging a spurious network error.
+        break;
+      }
       if (cause instanceof TelegramConflictError) {
         // Another consumer (e.g. another plugin polling the same token) owns
         // getUpdates. Stop gracefully instead of crash-looping; the plugin
