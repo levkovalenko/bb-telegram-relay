@@ -100,6 +100,17 @@ reload.
 - HTTP 409 (another consumer polls the same token): the poller logs and stops
   gracefully (state `conflict`) instead of crash-looping. Stop the other
   consumer and run `bb plugin reload telegram-relay`.
+- DNS result order: the local resolver can serve a dead AAAA record for
+  `api.telegram.org` and returns A/AAAA in a floating order; with Node's
+  default (`verbatim`) order `fetch` tries the dead IPv6 route first
+  whenever the AAAA arrives first, and `getUpdates` then times out. On load
+  the plugin pins the process default to `ipv4first` — only while it is
+  still the default, an explicit `--dns-result-order` is left untouched
+  (`dns.setDefaultResultOrder`, the same knob the flag sets).
+  Verify: the plugin log contains
+  `dns result order set to ipv4first (default was verbatim)`, and
+  `node --dns-result-order=ipv4first -e "fetch('https://api.telegram.org').then(r=>console.log(r.status))"`
+  prints `200`.
 
 ## Development
 

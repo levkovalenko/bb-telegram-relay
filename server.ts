@@ -19,6 +19,7 @@
 //   rpc      (bb.rpc): status / channels / subscribers / deliveries /
 //     broadcast for the M3 management panel
 
+import * as dns from "node:dns";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { createBot } from "./lib/commands.js";
@@ -141,6 +142,22 @@ function parseFlagArgs(argv: string[]): Record<string, string> {
 
 export default async function plugin(bb: BbPluginApi) {
   bb.log.info("loaded");
+
+  // The host's DNS resolver serves a dead AAAA record for api.telegram.org
+  // and returns A/AAAA in a floating order; with Node's default (verbatim)
+  // result order, fetch tries the dead IPv6 route first whenever the AAAA
+  // arrives first and every getUpdates times out (the broken v6 route also
+  // served cached responses that ignored the offset). Pin this process's
+  // default DNS result order to ipv4first — only while it is still the
+  // default: an explicit operator choice (--dns-result-order, readable via
+  // dns.getDefaultResultOrder) is left untouched.
+  // (There is no process.dnsResultOrder property in Node — assigning it is
+  // a no-op; dns.setDefaultResultOrder is the stable API for the same
+  // default that --dns-result-order sets.)
+  if (dns.getDefaultResultOrder() === "verbatim") {
+    dns.setDefaultResultOrder("ipv4first");
+    bb.log.info("dns result order set to ipv4first (default was verbatim)");
+  }
 
   // Settings: botToken is secret (0600 file, never in db/frontend); the rest
   // have defaults and are re-read by the poller on every loop iteration.

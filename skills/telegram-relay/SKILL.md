@@ -51,5 +51,9 @@ loop, so `enabled`/`pollTimeout` apply without a reload.
   and run `bb plugin reload telegram-relay`.
 - The polling offset is per-bot: after a bot token change the poller detects
   the new bot id (getMe) and starts a fresh sequence (offset 0).
+- DNS: on load the plugin pins the process DNS result order to `ipv4first`
+  (the host resolver serves a dead AAAA for api.telegram.org; an explicit
+  `--dns-result-order` is never overwritten). The log line
+  `dns result order set to ipv4first` confirms it.
 - Logs carry metadata only (chat id, command, outcome); message contents and
   the token are never logged.
